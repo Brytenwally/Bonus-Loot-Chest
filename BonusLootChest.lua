@@ -1,14 +1,17 @@
 -- =============================================================================
--- BossLootChest.lua  –  AzerothCore | Eluna LUA Engine (ALE)
--- Version: 6.0.0 (Verbose Debug Mode)
+-- BonusLootChest.lua  –  AzerothCore | Eluna LUA Engine (ALE)
+-- Version: 6.4.1 (Verbose Debug Mode - Visibility Fix)
 -- =============================================================================
 
 ------------------------------------------------------------------------
 -- CONFIGURATION
 ------------------------------------------------------------------------
 local CFG = {
-    CHEST_ENTRY       = 2843,   -- GO entry
-    CHEST_DESPAWN_SEC = 300,      -- seconds
+    CHEST_ENTRY       = 2843,     -- GO entry
+    CHEST_DESPAWN_SEC = 30,      -- seconds
+
+    BOSS_CHEST_CHANCE  = 100,     -- Chance to spawn on boss kill (1-100)
+    QUEST_CHEST_CHANCE = 100,     -- Chance to spawn on quest completion by leader (1-100)
 
     MIN_ITEM_ID  = 91000,
     MAX_ITEM_ID  = 5000000,
@@ -58,7 +61,7 @@ do
 end
 
 local function dbg(msg)
-    if CFG.DEBUG then print("[BossLootChest DEBUG] " .. tostring(msg)) end
+    if CFG.DEBUG then print("[BonusLootChest DEBUG] " .. tostring(msg)) end
 end
 
 local function rollQuality()
@@ -81,10 +84,10 @@ end
 local ARMOR_CLASS    = 4   -- item_template.class = 4 means Armor
 local PLATE_SUBCLASS = 4   -- item_template.subclass = 4 means Plate
 
-local function queryItemEntries(quality, levelMin, levelMax, bossLevel)
+local function queryItemEntries(quality, levelMin, levelMax, targetLevel)
     -- Build an optional extra filter to block plate armour for low-level bosses.
     local plateFilter = ""
-    if bossLevel < 40 then
+    if targetLevel < 40 then
         -- Exclude rows that are Armor (class=4) AND Plate subclass (subclass=4).
         plateFilter = string.format(" AND NOT (class=%d AND subclass=%d)", ARMOR_CLASS, PLATE_SUBCLASS)
     end
@@ -93,7 +96,7 @@ local function queryItemEntries(quality, levelMin, levelMax, bossLevel)
         "SELECT entry FROM item_template WHERE class IN (%s) AND Quality=%d AND RequiredLevel BETWEEN %d AND %d AND entry BETWEEN %d AND %d%s ORDER BY RAND() LIMIT 100",
         CLASS_IN, quality, levelMin, levelMax, CFG.MIN_ITEM_ID, CFG.MAX_ITEM_ID, plateFilter
     )
-    dbg(string.format("Query (bossLevel=%d): %s", bossLevel, sql))
+    dbg(string.format("Query (targetLevel=%d): %s", targetLevel, sql))
     local result = WorldDBQuery(sql)
     local entries = {}
     if result then
@@ -103,16 +106,16 @@ local function queryItemEntries(quality, levelMin, levelMax, bossLevel)
     return entries
 end
 
-local function pickItemEntry(quality, bossLevel)
-    local lo = math.max(0, bossLevel - CFG.LEVEL_BELOW_TIGHT)
-    local hi = bossLevel + CFG.LEVEL_ABOVE_TIGHT
-    local pool = queryItemEntries(quality, lo, hi, bossLevel)
+local function pickItemEntry(quality, targetLevel)
+    local lo = math.max(0, targetLevel - CFG.LEVEL_BELOW_TIGHT)
+    local hi = targetLevel + CFG.LEVEL_ABOVE_TIGHT
+    local pool = queryItemEntries(quality, lo, hi, targetLevel)
     dbg(string.format("Tight range [%d-%d] returned %d result(s) for quality %d", lo, hi, #pool, quality))
 
     if #pool == 0 then
-        lo = math.max(0, bossLevel - CFG.LEVEL_BELOW_WIDE)
-        hi = bossLevel + CFG.LEVEL_ABOVE_WIDE
-        pool = queryItemEntries(quality, lo, hi, bossLevel)
+        lo = math.max(0, targetLevel - CFG.LEVEL_BELOW_WIDE)
+        hi = targetLevel + CFG.LEVEL_ABOVE_WIDE
+        pool = queryItemEntries(quality, lo, hi, targetLevel)
         dbg(string.format("Wide range [%d-%d] returned %d result(s) for quality %d", lo, hi, #pool, quality))
     end
 
@@ -148,9 +151,12 @@ end
 ------------------------------------------------------------------------
 -- Core Spawn Function
 ------------------------------------------------------------------------
-local function spawnBonusChest(bossName, bossLevel, x, y, z, o, mapId, instanceId)
+local function spawnBonusChest(summoner, sourceName, targetLevel, x, y, z, o)
+    local mapId = summoner:GetMapId()
+    local instanceId = summoner:GetInstanceId()
+
     dbg("--- START SPAWN ATTEMPT ---")
-    dbg(string.format("Boss: %s (Level %d)", bossName, bossLevel))
+    dbg(string.format("Source: %s (Level %d)", sourceName, targetLevel))
     dbg(string.format("Position: X:%.2f, Y:%.2f, Z:%.2f, O:%.2f", x, y, z, o))
     dbg(string.format("MapID: %d | InstanceID: %d", mapId, instanceId))
 
@@ -164,7 +170,7 @@ local function spawnBonusChest(bossName, bossLevel, x, y, z, o, mapId, instanceI
         local quality = rollQuality()
         local entry
         for attempt = 1, 5 do
-            entry = pickItemEntry(quality, bossLevel)
+            entry = pickItemEntry(quality, targetLevel)
             if not entry or not usedEntries[entry] then break end
         end
         if entry then
@@ -180,13 +186,12 @@ local function spawnBonusChest(bossName, bossLevel, x, y, z, o, mapId, instanceI
         return
     end
 
-    -- Spawn chest
-    local despawnMs = CFG.CHEST_DESPAWN_SEC * 1000
-    dbg("Calling PerformIngameSpawn...")
-    local go = PerformIngameSpawn(2, CFG.CHEST_ENTRY, mapId, instanceId, x, y, z, o, false, despawnMs)
+    -- Spawn chest using the summoner to inherit perfect visibility, map, and phasing natively
+    dbg("Calling SummonGameObject...")
+    local go = summoner:SummonGameObject(CFG.CHEST_ENTRY, x, y, z, o, CFG.CHEST_DESPAWN_SEC)
 
     if not go then
-        dbg("CRITICAL: PerformIngameSpawn returned nil.")
+        dbg("CRITICAL: SummonGameObject returned nil.")
         return
     end
 
@@ -220,12 +225,9 @@ end
 
 ------------------------------------------------------------------------
 -- Events
--- PLAYER_EVENT_ON_KILL_CREATURE = 7, signature: (event, killer, killed)
--- killer is a valid Player object at event time.
--- All data we need is read from `killed` immediately — no userdata stored.
--- A per-boss GUID cooldown table prevents double-spawns when multiple
--- players in a party receive simultaneous kill credit.
 ------------------------------------------------------------------------
+
+-- 1. Boss Kill Event
 local function OnPlayerKillCreature(event, killer, killed)
     if not isBoss(killed) then return end
 
@@ -236,24 +238,75 @@ local function OnPlayerKillCreature(event, killer, killed)
         dbg(string.format("Skipping duplicate kill event for boss GUID %d.", bossGuid))
         return
     end
+
+    -- Chance check
+    if math.random(1, 100) > CFG.BOSS_CHEST_CHANCE then
+        dbg("Boss kill rolled below spawn chance threshold. No chest.")
+        return
+    end
+
     recentlySpawned[bossGuid] = true
 
-    -- Read everything from `killed` now while it's valid.
-    -- All captured values are plain Lua strings/numbers — safe across the delay.
     local bossName    = killed:GetName()
     local bossLevel   = killed:GetLevel()
-    local x, y, z, o = killed:GetX(), killed:GetY(), killed:GetZ(), killed:GetO()
-    local mapId       = killed:GetMapId()
-    local instanceId  = killed:GetInstanceId()
+    local x, y, z, o  = killed:GetX(), killed:GetY(), killed:GetZ(), killed:GetO()
+    local playerGuid  = killer:GetGUID()
 
     dbg(string.format("Event Triggered: '%s' (Level %d) died. Scheduling spawn...", bossName, bossLevel))
 
     CreateLuaEvent(function()
-        spawnBonusChest(bossName, bossLevel, x, y, z, o, mapId, instanceId)
-        -- Clear cooldown after the spawn window has passed
+        local summoner = GetPlayerByGUID(playerGuid)
+        if summoner then
+            spawnBonusChest(summoner, bossName, bossLevel, x, y, z, o)
+        end
         recentlySpawned[bossGuid] = nil
     end, CFG.SPAWN_COOLDOWN_MS, 1)
 end
 
-RegisterPlayerEvent(7, OnPlayerKillCreature)
-print("[BossLootChest] v6.0 loaded with Verbose Debugging.")
+-- 2. Quest Complete Event (Field Completion)
+local function OnPlayerCompleteQuest(event, player, quest)
+    -- Chance check
+    if math.random(1, 100) > CFG.QUEST_CHEST_CHANCE then
+        dbg("Quest completion rolled below spawn chance threshold. No chest.")
+        return
+    end
+
+    -- Group Leader check
+    local group = player:GetGroup()
+    if not group or group:GetLeaderGUID() ~= player:GetGUID() then
+        dbg("Quest completed but player is not the group leader (or not in a group).")
+        return
+    end
+
+    -- Get quest info from DB
+    local questId = quest:GetId()
+    local questLevel = quest:GetLevel()
+    if questLevel <= 0 then questLevel = player:GetLevel() end -- Fallback if quest level is 0
+    
+    local questTitle = "Quest#" .. questId
+    local query = WorldDBQuery(string.format("SELECT LogTitle FROM quest_template WHERE ID = %d", questId))
+    if query then
+        questTitle = query:GetString(0)
+    end
+    
+    local x, y, z, o = player:GetX(), player:GetY(), player:GetZ(), player:GetO()
+    local playerGuid = player:GetGUID()
+
+    -- Apply continuous random offset between -5 and +5 for X and Y axes
+    x = x + ((math.random() * 10) - 5)
+    y = y + ((math.random() * 10) - 5)
+
+    dbg(string.format("Event Triggered: Quest '%s' (Level %d) completed by leader. Scheduling spawn...", questTitle, questLevel))
+
+    CreateLuaEvent(function()
+        local summoner = GetPlayerByGUID(playerGuid)
+        if summoner then
+            spawnBonusChest(summoner, "Quest: " .. questTitle, questLevel, x, y, z, o)
+        end
+    end, CFG.SPAWN_COOLDOWN_MS, 1)
+end
+
+RegisterPlayerEvent(7, OnPlayerKillCreature)   -- PLAYER_EVENT_ON_KILL_CREATURE
+RegisterPlayerEvent(54, OnPlayerCompleteQuest) -- PLAYER_EVENT_ON_COMPLETE_QUEST
+
+print("[BossLootChest] v6.4.1 loaded with SummonGameObject visibility fix.")
