@@ -13,7 +13,7 @@ local CFG = {
     BOSS_CHEST_CHANCE  = 100,     -- Chance to spawn on boss kill (1-100)
     QUEST_CHEST_CHANCE = 100,     -- Chance to spawn on quest completion by leader (1-100)
 
-    MIN_ITEM_ID  = 91000,
+    MIN_ITEM_ID  = 0,
     MAX_ITEM_ID  = 5000000,
 
     MIN_ITEMS = 1,
